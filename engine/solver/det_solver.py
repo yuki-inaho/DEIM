@@ -21,8 +21,20 @@ from ..optim.lr_scheduler import FlatCosineLRScheduler
 
 class DetSolver(BaseSolver):
 
+    def _set_optimizer_mode(self, mode: str) -> None:
+        optimizer = getattr(self, 'optimizer', None)
+        mode_fn = getattr(optimizer, mode, None)
+        if callable(mode_fn):
+            mode_fn()
+
+    def _save_state(self, checkpoint_path) -> None:
+        self._set_optimizer_mode('eval')
+        dist_utils.save_on_master(self.state_dict(), checkpoint_path)
+        self._set_optimizer_mode('train')
+
     def fit(self, ):
         self.train()
+        self._set_optimizer_mode('train')
         args = self.cfg
 
         n_parameters, model_stats = stats(self.cfg)
@@ -44,6 +56,7 @@ class DetSolver(BaseSolver):
         # evaluate again before resume training
         if self.last_epoch > 0:
             module = self.ema.module if self.ema else self.model
+            self._set_optimizer_mode('eval')
             test_stats, coco_evaluator = evaluate(
                 module,
                 self.criterion,
@@ -52,6 +65,7 @@ class DetSolver(BaseSolver):
                 self.evaluator,
                 self.device
             )
+            self._set_optimizer_mode('train')
             for k in test_stats:
                 best_stat['epoch'] = self.last_epoch
                 best_stat[k] = test_stats[k][0]
@@ -62,6 +76,7 @@ class DetSolver(BaseSolver):
         start_time = time.time()
         start_epoch = self.last_epoch + 1
         for epoch in range(start_epoch, args.epoches):
+            self._set_optimizer_mode('train')
 
             self.train_dataloader.set_epoch(epoch)
             # self.train_dataloader.dataset.set_epoch(epoch)
@@ -91,7 +106,7 @@ class DetSolver(BaseSolver):
             )
 
             if not self.self_lr_scheduler:  # update by epoch 
-                if self.lr_warmup_scheduler is None or self.lr_warmup_scheduler.finished():
+                if self.lr_scheduler is not None and (self.lr_warmup_scheduler is None or self.lr_warmup_scheduler.finished()):
                     self.lr_scheduler.step()
 
             self.last_epoch += 1
@@ -102,9 +117,10 @@ class DetSolver(BaseSolver):
                 if (epoch + 1) % args.checkpoint_freq == 0:
                     checkpoint_paths.append(self.output_dir / f'checkpoint{epoch:04}.pth')
                 for checkpoint_path in checkpoint_paths:
-                    dist_utils.save_on_master(self.state_dict(), checkpoint_path)
+                    self._save_state(checkpoint_path)
 
             module = self.ema.module if self.ema else self.model
+            self._set_optimizer_mode('eval')
             test_stats, coco_evaluator = evaluate(
                 module,
                 self.criterion,
@@ -113,6 +129,7 @@ class DetSolver(BaseSolver):
                 self.evaluator,
                 self.device
             )
+            self._set_optimizer_mode('train')
 
             # TODO
             for k in test_stats:
@@ -132,9 +149,9 @@ class DetSolver(BaseSolver):
                     top1 = best_stat[k]
                     if self.output_dir:
                         if epoch >= self.train_dataloader.collate_fn.stop_epoch:
-                            dist_utils.save_on_master(self.state_dict(), self.output_dir / 'best_stg2.pth')
+                            self._save_state(self.output_dir / 'best_stg2.pth')
                         else:
-                            dist_utils.save_on_master(self.state_dict(), self.output_dir / 'best_stg1.pth')
+                            self._save_state(self.output_dir / 'best_stg1.pth')
 
                 best_stat_print[k] = max(best_stat[k], top1)
                 print(f'best_stat: {best_stat_print}')  # global best
@@ -143,10 +160,10 @@ class DetSolver(BaseSolver):
                     if epoch >= self.train_dataloader.collate_fn.stop_epoch:
                         if test_stats[k][0] > top1:
                             top1 = test_stats[k][0]
-                            dist_utils.save_on_master(self.state_dict(), self.output_dir / 'best_stg2.pth')
+                            self._save_state(self.output_dir / 'best_stg2.pth')
                     else:
                         top1 = max(test_stats[k][0], top1)
-                        dist_utils.save_on_master(self.state_dict(), self.output_dir / 'best_stg1.pth')
+                        self._save_state(self.output_dir / 'best_stg1.pth')
 
                 elif epoch >= self.train_dataloader.collate_fn.stop_epoch:
                     best_stat = {'epoch': -1, }
@@ -186,6 +203,7 @@ class DetSolver(BaseSolver):
         self.eval()
 
         module = self.ema.module if self.ema else self.model
+        self._set_optimizer_mode('eval')
         test_stats, coco_evaluator = evaluate(module, self.criterion, self.postprocessor,
                 self.val_dataloader, self.evaluator, self.device)
 
