@@ -73,6 +73,17 @@ class DetSolver(BaseSolver):
                 print(f'best_stat: {best_stat}')
 
         best_stat_print = best_stat.copy()
+        # ---- early stopping (config-driven via yaml_cfg / CLI -u) ----
+        _es_cfg = getattr(self.cfg, 'yaml_cfg', {}) or {}
+        es_enabled = bool(_es_cfg.get('early_stop', False))
+        es_patience = int(_es_cfg.get('early_stop_patience', 10))
+        es_min_delta = float(_es_cfg.get('early_stop_min_delta', 0.0))
+        es_start_epoch = int(_es_cfg.get('early_stop_start_epoch', 0))
+        es_wait = 0
+        es_best = top1
+        if es_enabled:
+            print(f'## EarlyStopping ON: patience={es_patience}, min_delta={es_min_delta}, '
+                  f'start_epoch={es_start_epoch} (metric = val mAP) ##')
         start_time = time.time()
         start_epoch = self.last_epoch + 1
         for epoch in range(start_epoch, args.epoches):
@@ -171,6 +182,18 @@ class DetSolver(BaseSolver):
                     self.load_resume_state(str(self.output_dir / 'best_stg1.pth'))
                     print(f'Refresh EMA at epoch {epoch} with decay {self.ema.decay}')
 
+            # ---- early stopping bookkeeping (metric = val mAP / top1) ----
+            _es_should_stop = False
+            if es_enabled and epoch >= es_start_epoch:
+                if top1 > es_best + es_min_delta:
+                    es_best = top1
+                    es_wait = 0
+                else:
+                    es_wait += 1
+                    print(f'[EarlyStop] no-improve {es_wait}/{es_patience} '
+                          f'(best mAP={es_best:.4f}, cur best={top1:.4f})')
+                    if es_wait >= es_patience:
+                        _es_should_stop = True
 
             log_stats = {
                 **{f'train_{k}': v for k, v in train_stats.items()},
@@ -193,6 +216,11 @@ class DetSolver(BaseSolver):
                         for name in filenames:
                             torch.save(coco_evaluator.coco_eval["bbox"].eval,
                                     self.output_dir / "eval" / name)
+
+            if _es_should_stop:
+                print(f'[EarlyStop] stopping at epoch {epoch}: no val(mAP) improvement '
+                      f'for {es_patience} epochs (best mAP={es_best:.4f})')
+                break
 
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
